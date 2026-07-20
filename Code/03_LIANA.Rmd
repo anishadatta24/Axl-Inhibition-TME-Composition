@@ -1,0 +1,194 @@
+---
+title: "03_LIANA"
+output: html_document
+date: "2025-06-09"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(writexl)
+library(Seurat)
+library(SingleCellExperiment)
+library(liana)
+library(reticulate)
+reticulate::use_condaenv('c2c_axl', required = TRUE)
+data_dir <- "/Users/anishadatta/Documents/DAL_Lab/Manuscript_CMBE/Axl-Inhibition-TME-Composition/Data" # Location of data
+```
+
+```{r Load annotated Seurat object and add sample_new and context columns to metadata include = FALSE}
+annotated_clusters <- readRDS(file.path(data_dir, "02_annotated_clustered_seuratobj.rds"))
+annotated_clusters$sample_new <- paste(annotated_clusters$culture, annotated_clusters$injured, annotated_clusters$treat, annotated_clusters$donor, sep = "_")
+annotated_clusters$context <- paste(annotated_clusters$injured, annotated_clusters$treat, sep = "_")
+annotated_clusters$context_with_culture <- paste(annotated_clusters$culture, annotated_clusters$injured, annotated_clusters$treat, sep = "_")
+annotated_clusters$cells_in_culture <- paste(annotated_clusters$culture, annotated_clusters$injured, sep = "_")
+```
+
+```{r Filter Seurat object to only have cell types of interest for each sample includue = FALSE}
+cells_for_liana <- NULL
+cells_to_include <- unique(annotated_clusters@meta.data$cells_in_culture)
+
+for (cond in cells_to_include){
+  if (cond == "co_N"){
+    cells_for_liana <- c(cells_for_liana, colnames(annotated_clusters)[annotated_clusters@meta.data$culture == 'co' & annotated_clusters@meta.data$injured == 'N' & (annotated_clusters@meta.data$seurat_annotations == "Macrophage 3" | annotated_clusters@meta.data$seurat_annotations == "Untreated Tumor Cell")])
+  }
+  if (cond == "co_Y"){
+    cells_for_liana <- c(cells_for_liana, colnames(annotated_clusters)[annotated_clusters@meta.data$culture == 'co' & annotated_clusters@meta.data$injured == 'Y' & (annotated_clusters@meta.data$seurat_annotations == "Macrophage 1" | annotated_clusters@meta.data$seurat_annotations == "Injured Tumor Cell")])
+  }
+  if (cond == "tri_N"){
+    cells_for_liana <- c(cells_for_liana, colnames(annotated_clusters)[annotated_clusters@meta.data$culture == 'tri' & annotated_clusters@meta.data$injured == 'N' & (annotated_clusters@meta.data$seurat_annotations == "Macrophage 2" | annotated_clusters@meta.data$seurat_annotations == "Dendritic Cell" | annotated_clusters@meta.data$seurat_annotations == "Untreated Tumor Cell")])
+  }
+  if (cond == "tri_Y"){
+    cells_for_liana <- c(cells_for_liana, colnames(annotated_clusters)[annotated_clusters@meta.data$culture == 'tri' & annotated_clusters@meta.data$injured == 'Y' & (annotated_clusters@meta.data$seurat_annotations == "Macrophage 2" | annotated_clusters@meta.data$seurat_annotations == "Dendritic Cell" | annotated_clusters@meta.data$seurat_annotations == "Injured Tumor Cell")])
+  }
+}
+
+input_for_liana <- subset(annotated_clusters, cells = cells_for_liana)
+
+input_for_liana$three_cell_type <- ifelse(input_for_liana$seurat_annotations %in% c("Macrophage 1", "Macrophage 2", "Macrophage 3"), "Macrophage", ifelse(input_for_liana$seurat_annotations %in% c("Untreated Tumor Cell", "Injured Tumor Cell"), "Tumor Cell", "Dendritic Cell"))
+Idents(input_for_liana) <- "three_cell_type"
+
+saveRDS(input_for_liana, file.path(data_dir, "03_seurat_input_for_LIANA.rds"))
+
+cell_counts_per_donor <- input_for_liana@meta.data %>%
+  group_by(sample_new, three_cell_type) %>%
+  summarise(cell_count = n(), .groups = 'drop')
+
+write_xlsx(cell_counts_per_donor, file.path(data_dir, "03_cells_per_donor_LIANA_input.xlsx"))
+```
+
+https://ccc-protocols.readthedocs.io/en/latest/notebooks/ccc_R/QuickStart.html
+```{r Run LIANA on the 32 samples include = FALSE}
+data_for_liana <- as.SingleCellExperiment(input_for_liana)
+
+data_for_liana <- liana_bysample(sce = data_for_liana, sample_col = "sample_new", idents_col = "three_cell_type", resource = 'Consensus', expr_prop = 0.1, min_cells = 50, assay.type = 'logcounts', aggregate_how = 'both', verbose = TRUE, inplace = TRUE, permutation.params = list(nperms = 100))
+
+liana_res <- data_for_liana@metadata$liana_res %>% bind_rows(.id = "sample_new") %>% mutate(sample_new = factor(sample_new, levels = unique(sample_new)))
+
+write.csv(liana_res, file.path(data_dir, "03_LIANA_results_by_sample.csv"))
+saveRDS(data_for_liana, file.path(data_dir, "03_sce_LIANA_results_by_sample.rds"))
+```
+
+```{r Build tensor include = FALSE}
+data_for_liana <- readRDS(file.path(data_dir, "03_sce_LIANA_results_by_sample.rds"))
+sorted_samples = sort(names(data_for_liana@metadata$liana_res))
+
+# Set outer fraction to 0 since missing cell types are biologically expected/relevant 
+context_df_dict <- liana:::preprocess_scores(context_df_dict = data_for_liana@metadata[['liana_res']], outer_fraction = 0, invert = TRUE, invert_fun = function(x) 1-x, non_negative = TRUE, non_negative_fill = 0)
+
+#Fill missing cells with 0, since missing cells are true biological zeros. Fill missing LR pairs with 0 --> no imputation. 
+tensor <- liana_tensor_c2c(context_df_dict = context_df_dict, sender_col = "source", receiver_col = "target", ligand_col = "ligand.complex", score_col = 'magnitude_rank', how = 'outer', lr_fill = 0, cell_fill = 0, context_order = sorted_samples, conda_env = 'c2c_axl',build_only = TRUE)
+
+reticulate::py_save_object(object = tensor, filename = file.path(data_dir, '03_Tensor_pre_decomp.pkl'))
+```
+
+Tensor decomposition is not possible locally (due to computational demand), so at this point copy the tensor pkl file to the DAL Lab server and use the Luria cluster to do the tensor decomposition (with 04_Tensor_Decomp.py). Then analyze the pkl file that has the decomposition results in the subsequent R markdown file (04_Tensor_cell2cell_Post_Decomposition.Rmd). 
+
+```{r Generate tensor in which cell cluster identities are retained in the analysis (6 cell types instead of collapsing into 3 cell types include = FALSE}
+data_for_liana <- as.SingleCellExperiment(input_for_liana)
+
+data_for_liana <- liana_bysample(sce = data_for_liana, sample_col = "sample_new", idents_col = "seurat_annotations", resource = 'Consensus', expr_prop = 0.1, min_cells = 50, assay.type = 'logcounts', aggregate_how = 'both', verbose = TRUE, inplace = TRUE, permutation.params = list(nperms = 100))
+
+liana_res <- data_for_liana@metadata$liana_res %>% bind_rows(.id = "sample_new") %>% mutate(sample_new = factor(sample_new, levels = unique(sample_new)))
+saveRDS(data_for_liana, file.path(data_dir, "03_sce_LIANA_results_by_sample_6CellTypes.rds"))
+
+data_for_liana <- readRDS(file.path(data_dir, "03_sce_LIANA_results_by_sample_6CellTypes.rds"))
+sorted_samples = sort(names(data_for_liana@metadata$liana_res))
+
+# Set outer fraction to 0 since missing cell types are biologically expected/relevant 
+context_df_dict <- liana:::preprocess_scores(context_df_dict = data_for_liana@metadata[['liana_res']], outer_fraction = 0, invert = TRUE, invert_fun = function(x) 1-x, non_negative = TRUE, non_negative_fill = 0)
+
+#Fill missing cells with 0, since missing cells are true biological zeros. Fill missing LR pairs with 0 --> no imputation. 
+tensor <- liana_tensor_c2c(context_df_dict = context_df_dict, sender_col = "source", receiver_col = "target", ligand_col = "ligand.complex", score_col = 'magnitude_rank', how = 'outer', lr_fill = 0, cell_fill = 0, context_order = sorted_samples, conda_env = 'c2c_axl',build_only = TRUE)
+
+reticulate::py_save_object(object = tensor, filename = file.path(data_dir, '03_Tensor_pre_decomp_6CellTypes.pkl'))
+```
+
+> sessionInfo()
+R version 4.4.1 (2024-06-14)
+Platform: x86_64-apple-darwin20
+Running under: macOS 15.7.7
+
+Matrix products: default
+BLAS:   /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib 
+LAPACK: /Library/Frameworks/R.framework/Versions/4.4-x86_64/Resources/lib/libRlapack.dylib;  LAPACK version 3.12.0
+
+locale:
+[1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
+
+time zone: America/New_York
+tzcode source: internal
+
+attached base packages:
+[1] stats4    stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] reticulate_1.40.0           liana_0.1.14                SingleCellExperiment_1.26.0
+ [4] SummarizedExperiment_1.34.0 Biobase_2.64.0              GenomicRanges_1.56.2       
+ [7] GenomeInfoDb_1.40.1         IRanges_2.38.1              S4Vectors_0.42.1           
+[10] BiocGenerics_0.50.0         MatrixGenerics_1.16.0       matrixStats_1.4.1          
+[13] Seurat_5.1.0                SeuratObject_5.0.2          sp_2.1-4                   
+[16] writexl_1.5.1               tidyr_1.3.1                 dplyr_1.1.4                
+
+loaded via a namespace (and not attached):
+  [1] spatstat.sparse_3.1-0     fs_1.6.5                  lubridate_1.9.3          
+  [4] httr_1.4.7                RColorBrewer_1.1-3        doParallel_1.0.17        
+  [7] tools_4.4.1               sctransform_0.4.1         backports_1.5.0          
+ [10] utf8_1.2.4                R6_2.5.1                  uwot_0.2.2               
+ [13] lazyeval_0.2.2            GetoptLong_1.0.5          withr_3.0.2              
+ [16] prettyunits_1.2.0         gridExtra_2.3             progressr_0.15.0         
+ [19] cli_3.6.3                 spatstat.explore_3.3-3    fastDummies_1.7.4        
+ [22] spatstat.data_3.1-4       S7_0.2.0                  readr_2.1.5              
+ [25] ggridges_0.5.6            pbapply_1.7-2             R.utils_2.13.0           
+ [28] parallelly_1.39.0         sessioninfo_1.2.2         limma_3.60.6             
+ [31] readxl_1.4.3              rstudioapi_0.17.1         RSQLite_2.3.8            
+ [34] generics_0.1.3            shape_1.4.6.1             spatstat.random_3.3-2    
+ [37] ica_1.0-3                 zip_2.3.1                 Matrix_1.7-1             
+ [40] fansi_1.0.6               logger_0.4.0              abind_1.4-8              
+ [43] R.methodsS3_1.8.2         lifecycle_1.0.4           yaml_2.3.10              
+ [46] edgeR_4.2.2               SparseArray_1.4.8         Rtsne_0.17               
+ [49] grid_4.4.1                blob_1.2.4                promises_1.3.0           
+ [52] dqrng_0.4.1               crayon_1.5.3              dir.expiry_1.10.0        
+ [55] miniUI_0.1.1.1            lattice_0.22-6            beachmat_2.20.0          
+ [58] cowplot_1.1.3             chromote_0.5.1            pillar_1.9.0             
+ [61] knitr_1.49                ComplexHeatmap_2.18.0     metapod_1.10.1           
+ [64] rjson_0.2.23              future.apply_1.11.3       codetools_0.2-20         
+ [67] leiden_0.4.3.1            glue_1.8.0                spatstat.univar_3.1-1    
+ [70] data.table_1.16.2         vctrs_0.6.5               png_0.1-8                
+ [73] spam_2.11-0               cellranger_1.1.0          gtable_0.3.6             
+ [76] cachem_1.1.0              OmnipathR_3.15.9          xfun_0.49                
+ [79] S4Arrays_1.4.1            mime_0.12                 survival_3.7-0           
+ [82] iterators_1.0.14          statmod_1.5.0             bluster_1.12.0           
+ [85] fitdistrplus_1.2-1        ROCR_1.0-11               nlme_3.1-166             
+ [88] bit64_4.5.2               progress_1.2.3            filelock_1.0.3           
+ [91] RcppAnnoy_0.0.22          irlba_2.3.5.1             KernSmooth_2.23-24       
+ [94] colorspace_2.1-1          DBI_1.2.3                 tidyselect_1.2.1         
+ [97] processx_3.8.6            bit_4.5.0                 compiler_4.4.1           
+[100] curl_6.0.1                rvest_1.0.4               httr2_1.0.6              
+[103] BiocNeighbors_1.22.0      basilisk.utils_1.19.1     xml2_1.3.6               
+[106] DelayedArray_0.30.1       plotly_4.10.4             checkmate_2.3.2          
+[109] scales_1.4.0              lmtest_0.9-40             rappdirs_0.3.3           
+[112] goftest_1.2-3             stringr_1.5.1             digest_0.6.37            
+[115] spatstat.utils_3.1-1      rmarkdown_2.29            basilisk_1.19.1          
+[118] XVector_0.44.0            htmltools_0.5.8.1         pkgconfig_2.0.3          
+[121] sparseMatrixStats_1.16.0  fastmap_1.2.0             rlang_1.1.4              
+[124] GlobalOptions_0.1.2       htmlwidgets_1.6.4         UCSC.utils_1.0.0         
+[127] shiny_1.9.1               DelayedMatrixStats_1.26.0 farver_2.1.2             
+[130] zoo_1.8-12                jsonlite_1.8.9            BiocParallel_1.38.0      
+[133] R.oo_1.27.0               BiocSingular_1.20.0       magrittr_2.0.3           
+[136] scuttle_1.14.0            GenomeInfoDbData_1.2.12   dotCall64_1.2            
+[139] patchwork_1.3.0           Rcpp_1.0.13-1             stringi_1.8.4            
+[142] zlibbioc_1.50.0           MASS_7.3-61               plyr_1.8.9               
+[145] parallel_4.4.1            listenv_0.9.1             ggrepel_0.9.6            
+[148] deldir_2.0-4              splines_4.4.1             tensor_1.5               
+[151] hms_1.1.3                 circlize_0.4.16           locfit_1.5-9.10          
+[154] ps_1.8.1                  igraph_2.1.1              spatstat.geom_3.3-4      
+[157] RcppHNSW_0.6.0            reshape2_1.4.4            ScaledMatrix_1.12.0      
+[160] XML_3.99-0.17             evaluate_1.0.1            scran_1.32.0             
+[163] tzdb_0.4.0                foreach_1.5.2             httpuv_1.6.15            
+[166] polyclip_1.10-7           RANN_2.6.2                purrr_1.0.2              
+[169] future_1.34.0             clue_0.3-66               scattermore_1.2          
+[172] ggplot2_4.0.0             rsvd_1.0.5                xtable_1.8-6             
+[175] RSpectra_0.16-2           later_1.3.2               viridisLite_0.4.2        
+[178] tibble_3.2.1              websocket_1.4.4           memoise_2.0.1            
+[181] cluster_2.1.6             timechange_0.3.0          globals_0.16.3 

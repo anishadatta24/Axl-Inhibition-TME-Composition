@@ -1,0 +1,143 @@
+---
+title: "03_LIANA_OPLSDA"
+output: html_document
+date: "2026-04-22"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(writexl)
+library(Seurat)
+library(SingleCellExperiment)
+library(liana)
+library(reticulate)
+reticulate::use_condaenv('c2c_axl', required = TRUE)
+data_dir <- "/Users/anishadatta/Documents/DAL_Lab/Manuscript_CMBE/Axl-Inhibition-TME-Composition/Data" # Location of data
+```
+
+```{r Load LIANA results and create dataframe of results include = FALSE}
+data_for_liana <- readRDS(file.path(data_dir, "03_sce_LIANA_results_by_sample.rds"))
+liana_res <- data_for_liana@metadata$liana_res %>% bind_rows(.id = "sample_new") %>% mutate(sample_new = factor(sample_new, levels = unique(sample_new)))
+
+# Add columns of metadata
+liana_res <- liana_res %>%
+  mutate(Donor = case_when(
+    grepl("_A", sample_new) ~ "A",
+    grepl("Bem_B", sample_new) ~ "B",
+    grepl("DMSO_B", sample_new) ~ "B",
+    grepl("_C", sample_new) ~ "C",
+    grepl("Bem_D", sample_new) ~ "D",
+    grepl("DMSO_D", sample_new) ~ "D"
+  ),
+  Culture = case_when(
+    grepl("co_", sample_new) ~ "Co-Culture",
+    grepl("tri_", sample_new) ~ "Tri-Culture"
+  ),
+  A375 = case_when(
+    grepl("_N_", sample_new) ~ "Untreated",
+    grepl("_Y_", sample_new) ~ "Injured"
+  ),
+  Inhibitor = case_when(
+    grepl("_Bem_", sample_new) ~ "Bem",
+    grepl("_DMSO_", sample_new) ~ "DMSO"
+  ))
+
+liana_res <- liana_res %>%
+  select(Donor, Culture, A375, Inhibitor, everything())
+
+write.csv(liana_res, file.path(data_dir, "11_LIANA_results_by_sample_for_OPLSDA.csv"))
+```
+
+At this point the csv file is shared with Remziye, and she runs O-PLSDA on the data in MATLAB. 
+
+> sessionInfo()
+R version 4.4.1 (2024-06-14)
+Platform: x86_64-apple-darwin20
+Running under: macOS 15.7.7
+
+Matrix products: default
+BLAS:   /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib 
+LAPACK: /Library/Frameworks/R.framework/Versions/4.4-x86_64/Resources/lib/libRlapack.dylib;  LAPACK version 3.12.0
+
+locale:
+[1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
+
+time zone: America/New_York
+tzcode source: internal
+
+attached base packages:
+[1] stats4    stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] reticulate_1.40.0           liana_0.1.14                SingleCellExperiment_1.26.0
+ [4] SummarizedExperiment_1.34.0 Biobase_2.64.0              GenomicRanges_1.56.2       
+ [7] GenomeInfoDb_1.40.1         IRanges_2.38.1              S4Vectors_0.42.1           
+[10] BiocGenerics_0.50.0         MatrixGenerics_1.16.0       matrixStats_1.4.1          
+[13] Seurat_5.1.0                SeuratObject_5.0.2          sp_2.1-4                   
+[16] writexl_1.5.1               tidyr_1.3.1                 purrr_1.0.2                
+[19] dplyr_1.1.4                
+
+loaded via a namespace (and not attached):
+  [1] fs_1.6.5                  spatstat.sparse_3.1-0     lubridate_1.9.3          
+  [4] httr_1.4.7                RColorBrewer_1.1-3        doParallel_1.0.17        
+  [7] tools_4.4.1               sctransform_0.4.1         backports_1.5.0          
+ [10] utf8_1.2.4                R6_2.5.1                  lazyeval_0.2.2           
+ [13] uwot_0.2.2                GetoptLong_1.0.5          withr_3.0.2              
+ [16] prettyunits_1.2.0         gridExtra_2.3             progressr_0.15.0         
+ [19] cli_3.6.3                 spatstat.explore_3.3-3    fastDummies_1.7.4        
+ [22] S7_0.2.0                  spatstat.data_3.1-4       readr_2.1.5              
+ [25] ggridges_0.5.6            pbapply_1.7-2             R.utils_2.13.0           
+ [28] parallelly_1.39.0         sessioninfo_1.2.2         limma_3.60.6             
+ [31] readxl_1.4.3              rstudioapi_0.17.1         RSQLite_2.3.8            
+ [34] generics_0.1.3            shape_1.4.6.1             ica_1.0-3                
+ [37] spatstat.random_3.3-2     zip_2.3.1                 Matrix_1.7-1             
+ [40] fansi_1.0.6               logger_0.4.0              abind_1.4-8              
+ [43] R.methodsS3_1.8.2         lifecycle_1.0.4           edgeR_4.2.2              
+ [46] yaml_2.3.10               SparseArray_1.4.8         Rtsne_0.17               
+ [49] grid_4.4.1                blob_1.2.4                dqrng_0.4.1              
+ [52] promises_1.3.0            crayon_1.5.3              dir.expiry_1.10.0        
+ [55] miniUI_0.1.1.1            lattice_0.22-6            beachmat_2.20.0          
+ [58] cowplot_1.1.3             chromote_0.5.1            metapod_1.10.1           
+ [61] pillar_1.9.0              knitr_1.49                ComplexHeatmap_2.18.0    
+ [64] rjson_0.2.23              future.apply_1.11.3       codetools_0.2-20         
+ [67] leiden_0.4.3.1            glue_1.8.0                spatstat.univar_3.1-1    
+ [70] data.table_1.16.2         vctrs_0.6.5               png_0.1-8                
+ [73] spam_2.11-0               cellranger_1.1.0          gtable_0.3.6             
+ [76] cachem_1.1.0              OmnipathR_3.15.9          xfun_0.49                
+ [79] S4Arrays_1.4.1            mime_0.12                 survival_3.7-0           
+ [82] iterators_1.0.14          statmod_1.5.0             bluster_1.12.0           
+ [85] fitdistrplus_1.2-1        ROCR_1.0-11               nlme_3.1-166             
+ [88] bit64_4.5.2               progress_1.2.3            filelock_1.0.3           
+ [91] RcppAnnoy_0.0.22          irlba_2.3.5.1             KernSmooth_2.23-24       
+ [94] colorspace_2.1-1          DBI_1.2.3                 tidyselect_1.2.1         
+ [97] processx_3.8.6            bit_4.5.0                 compiler_4.4.1           
+[100] curl_6.0.1                rvest_1.0.4               httr2_1.0.6              
+[103] BiocNeighbors_1.22.0      basilisk.utils_1.19.1     xml2_1.3.6               
+[106] DelayedArray_0.30.1       plotly_4.10.4             checkmate_2.3.2          
+[109] scales_1.4.0              lmtest_0.9-40             rappdirs_0.3.3           
+[112] stringr_1.5.1             digest_0.6.37             goftest_1.2-3            
+[115] spatstat.utils_3.1-1      rmarkdown_2.29            basilisk_1.19.1          
+[118] XVector_0.44.0            htmltools_0.5.8.1         pkgconfig_2.0.3          
+[121] sparseMatrixStats_1.16.0  fastmap_1.2.0             rlang_1.1.4              
+[124] GlobalOptions_0.1.2       htmlwidgets_1.6.4         UCSC.utils_1.0.0         
+[127] DelayedMatrixStats_1.26.0 shiny_1.9.1               farver_2.1.2             
+[130] zoo_1.8-12                jsonlite_1.8.9            BiocParallel_1.38.0      
+[133] R.oo_1.27.0               BiocSingular_1.20.0       magrittr_2.0.3           
+[136] scuttle_1.14.0            GenomeInfoDbData_1.2.12   dotCall64_1.2            
+[139] patchwork_1.3.0           Rcpp_1.0.13-1             stringi_1.8.4            
+[142] zlibbioc_1.50.0           MASS_7.3-61               plyr_1.8.9               
+[145] parallel_4.4.1            listenv_0.9.1             ggrepel_0.9.6            
+[148] deldir_2.0-4              splines_4.4.1             tensor_1.5               
+[151] hms_1.1.3                 circlize_0.4.16           locfit_1.5-9.10          
+[154] ps_1.8.1                  igraph_2.1.1              spatstat.geom_3.3-4      
+[157] RcppHNSW_0.6.0            ScaledMatrix_1.12.0       reshape2_1.4.4           
+[160] XML_3.99-0.17             evaluate_1.0.1            scran_1.32.0             
+[163] tzdb_0.4.0                foreach_1.5.2             httpuv_1.6.15            
+[166] RANN_2.6.2                polyclip_1.10-7           future_1.34.0            
+[169] clue_0.3-66               scattermore_1.2           ggplot2_4.0.0            
+[172] rsvd_1.0.5                xtable_1.8-6              RSpectra_0.16-2          
+[175] later_1.3.2               viridisLite_0.4.2         tibble_3.2.1             
+[178] websocket_1.4.4           memoise_2.0.1             cluster_2.1.6            
+[181] timechange_0.3.0          globals_0.16.3 

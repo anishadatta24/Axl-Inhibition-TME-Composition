@@ -1,0 +1,436 @@
+---
+title: "GSEA_Visualization"
+output: html_document
+date: "2025-09-10"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(writexl)
+library(readxl)
+library(plotly)
+library(htmlwidgets)
+library(webshot2)
+library(msigdbr)
+data_dir <- "/Users/anishadatta/Documents/DAL_Lab/Manuscript_CMBE/Axl-Inhibition-TME-Composition/Data" # Location of data
+```
+
+```{r Function for generating gradient edges based on NES values include = FALSE}
+interpolate_edge <- function(p1, p2, val, n = 10) {
+  # Generate intermediate points between p1 and p2
+  x <- seq(p1[1], p2[1], length.out = n)
+  y <- seq(p1[2], p2[2], length.out = n)
+  z <- seq(p1[3], p2[3], length.out = n)
+  
+  # Interpolate color gradient
+  if (val > 0) {
+    cols <- colorRampPalette(c("firebrick4", "darkgrey", "gainsboro"))(n)
+  } else if (val < 0) {
+    cols <- colorRampPalette(c("gainsboro", "darkgrey", "firebrick4"))(n)
+  } else {
+    cols <- rep("gainsboro", n)
+  }
+  
+  list(x = x, y = y, z = z, col = cols)
+}
+```
+
+```{r Define cube vertices and edges}
+# Define cube vertices
+vertices <- matrix(c(
+  0, 0, 0, # Tri U DMSO (vertex 1)
+  1, 0, 0, # Co U DMSO (vertex 2)
+  1, 1, 0, # Co I DMSO (vertex 3)
+  0, 1, 0, # Tri I DMSO (vertex 4)
+  0, 0, 1, # Tri U Bem (vertex 5)
+  1, 0, 1, # Co U Bem (vertex 6)
+  1, 1, 1, # Co I Bem (vertex 7)
+  0, 1, 1  # Tri I Bem (vertex 8)
+), ncol = 3, byrow = TRUE)
+
+edges <- matrix(c(
+  6, 2, 7, 3, 5, 1, 8, 4, # 6, 2 = edge from vertex 6 to vertex 2, i.e., Co U Bem vs Co U DMSO
+  3, 2, 7, 6, 4, 1, 8, 5,
+  1, 2, 5, 6, 4, 3, 8, 7
+), ncol = 2, byrow = TRUE)
+```
+
+```{r Define square vertices and edges}
+vertices_square <- matrix(c(
+  0, 0, 0, # Tri U DMSO (vertex 1)
+  0, 1, 0, # Tri I DMSO (vertex 2)
+  0, 1, 1, # Tri I Bem (vertex 3)
+  0, 0, 1  # Tri U Bem (vertex 4)
+), ncol = 3, byrow = TRUE)
+
+edges_square <- matrix(c(
+  4, 1, 3, 2, 2, 1, 3, 4 # 4, 1 = edge from vertex 4 to vertex 1, i.e., Tri U Bem vs Tri U DMSO
+), ncol = 2, byrow = TRUE)
+```
+
+```{r Load signifcant Hallmark results from all 3 questions include = FALSE}
+Q1_hits <- readRDS(file.path(data_dir, "06_GSEA_significant_results_inhibitor_treatment_df.rds"))
+Q2_hits <- readRDS(file.path(data_dir, "06_GSEA_significant_results_A375_state_df.rds"))
+Q3_hits <- readRDS(file.path(data_dir, "06_GSEA_significant_results_culture_type_df.rds"))
+#Combine into one dataframe
+hits <- rbind(Q1_hits, Q2_hits, Q3_hits)
+```
+
+```{r Add metadata columns to facilitate cube visualization include = FALSE}
+hits <- hits %>%
+  mutate(From = case_when(
+    grepl("co_N_DMSO", ident1) ~ "Co U DMSO",
+    grepl("co_N_Bem", ident1) ~ "Co U Bem",
+    grepl("co_Y_DMSO", ident1) ~ "Co I DMSO",
+    grepl("co_Y_Bem", ident1) ~ "Co I Bem",
+    grepl("tri_N_DMSO", ident1) ~ "Tri U DMSO",
+    grepl("tri_N_Bem", ident1) ~ "Tri U Bem",
+    grepl("tri_Y_DMSO", ident1) ~ "Tri I DMSO",
+    grepl("tri_Y_Bem", ident1) ~ "Tri I Bem"
+  ),
+  To = case_when(
+    grepl("co_N_DMSO", ident2) ~ "Co U DMSO",
+    grepl("co_N_Bem", ident2) ~ "Co U Bem",
+    grepl("co_Y_DMSO", ident2) ~ "Co I DMSO",
+    grepl("co_Y_Bem", ident2) ~ "Co I Bem",
+    grepl("tri_N_DMSO", ident2) ~ "Tri U DMSO",
+    grepl("tri_N_Bem", ident2) ~ "Tri U Bem",
+    grepl("tri_Y_DMSO", ident2) ~ "Tri I DMSO",
+    grepl("tri_Y_Bem", ident2) ~ "Tri I Bem" 
+  ),
+  Cell = case_when(
+    grepl("Macrophage", ident1) ~ "Macrophage",
+    grepl("Tumor Cell", ident1) ~ "Tumor Cell",
+    grepl("Dendritic Cell", ident1) ~ "Dendritic Cell"
+  ))
+
+hits <- hits %>%
+  mutate(Vertex1 = case_when(
+    grepl("Co U DMSO", From) ~ 2,
+    grepl("Co U Bem", From) ~ 6,
+    grepl("Co I DMSO", From) ~ 3,
+    grepl("Co I Bem", From) ~ 7, 
+    grepl("Tri U DMSO", From) ~ 1,
+    grepl("Tri U Bem", From) ~ 5,
+    grepl("Tri I DMSO", From) ~ 4,
+    grepl("Tri I Bem", From) ~ 8
+  ),
+  Vertex2 = case_when(
+    grepl("Co U DMSO", To) ~ 2,
+    grepl("Co U Bem", To) ~ 6,
+    grepl("Co I DMSO", To) ~ 3,
+    grepl("Co I Bem", To) ~ 7, 
+    grepl("Tri U DMSO", To) ~ 1,
+    grepl("Tri U Bem", To) ~ 5,
+    grepl("Tri I DMSO", To) ~ 4,
+    grepl("Tri I Bem", To) ~ 8 
+  ))
+```
+
+```{r Generate list of unique pathways among GSEA hits include = FALSE}
+unique_pathways <- unique(hits$GeneSet)
+write_xlsx(as.data.frame(unique_pathways), file.path(data_dir, "07_HallmarkSignficantPathways.xlsx"))
+```
+
+```{r Generate cube visualization of GSEA results for macrophages and tumor cells include = FALSE}
+cell_types <- c("Macrophage", "Tumor Cell")
+
+for (cell in cell_types){
+  if(cell == "Macrophage"){
+    setwd(paste0(data_dir, "/07_Macrophage"))
+  } else{
+    setwd(paste0(data_dir, "/07_TumorCell"))
+  }
+  cube_input <- data.frame(Pathway = character(0),
+                     NES = numeric(0),
+                     padj = numeric(0),
+                     From = character(0),
+                     To = character(0),
+                     Cell = character(0))
+  for (pathway in unique_pathways){
+    cube_pathway <- data.frame(Pathway = rep(pathway, 12),
+                               NES = rep(0, 12), # NES treated as 0 when not significant
+                               padj = rep(1, 12), # padj treated as 1 when not significant
+                               From = c("Co U Bem", "Co I Bem", "Tri U Bem", "Tri I Bem",
+                                        "Co I DMSO", "Co I Bem", "Tri I DMSO", "Tri I Bem",
+                                        "Tri U DMSO", "Tri U Bem", "Tri I DMSO", "Tri I Bem"),
+                               To = c("Co U DMSO", "Co I DMSO", "Tri U DMSO", "Tri I DMSO",
+                                      "Co U DMSO", "Co U Bem", "Tri U DMSO", "Tri U Bem",
+                                      "Co U DMSO", "Co U Bem", "Co I DMSO", "Co I Bem"),
+                               Vertex1 = c(6, 7, 5, 8,
+                                           3, 7, 4, 8,
+                                           1, 5, 4, 8),
+                               Vertex2 = c(2, 3, 1, 4, 
+                                           2, 6, 1, 5,
+                                           2, 6, 3, 7),
+                               Cell = rep(cell, 12))
+    cube_data <- subset(hits, Cell == cell & GeneSet == pathway)
+    # Only replace cube_pathway values if cube_data is not an empty dataframe
+    if (nrow(cube_data) >= 1){
+      for (i in (1:nrow(cube_data))){
+      score <- cube_data$NES[i]
+      pval <- cube_data$p_adj[i]
+      V1 <- cube_data$Vertex1[i]
+      V2 <- cube_data$Vertex2[i]
+      cube_pathway[cube_pathway$Vertex1 == V1 & cube_pathway$Vertex2 == V2, "NES"] <- score
+      cube_pathway[cube_pathway$Vertex1 == V1 & cube_pathway$Vertex2 == V2, "padj"] <- pval
+    }
+    }
+    cube_input <- rbind(cube_input, cube_pathway)
+    
+    values <- cube_pathway$NES
+    
+    p <- plot_ly(type = "scatter3d", mode = "lines")
+
+    for (i in 1:nrow(edges)) {
+      p1 <- vertices[edges[i, 1], ]
+      p2 <- vertices[edges[i, 2], ]
+      val <- values[i]
+  
+      seg <- interpolate_edge(p1, p2, val, n = 20)
+
+      # Plot segments as very short lines (simulate gradient)
+        for (j in 1:(length(seg$x) - 1)) {
+          p <- add_trace(p,
+                         x = c(seg$x[j], seg$x[j+1]),
+                         y = c(seg$y[j], seg$y[j+1]),
+                         z = c(seg$z[j], seg$z[j+1]),
+                         mode = "lines",
+                         line = list(color = seg$col[j], width = 15),
+                         showlegend = FALSE
+               )
+        }
+    }
+
+    vertex_labels <- data.frame(
+    label = c("Tri U DMSO", "Co U DMSO", "Co I DMSO", "Tri I DMSO",
+              "Tri U Bem", "Co U Bem", "Co I Bem", "Tri I Bem")
+              )
+
+    # Assign text positions to avoid overlap
+    text_positions <- c(
+    "top left", "bottom left", "bottom right", "bottom right",
+    "top middle", "top middle", "bottom right", "top right"
+    )
+
+    # Offset amounts to nudge labels away from vertices
+    offsets <- data.frame(
+    x = c(0, 0, -0.05, 0.05, -0.05, 0.05, -0.05, 0.05),
+    y = c(0, 0.05, -0.05, -0.05, 0.05, 0.05, -0.05, -0.05),
+    z = c(-0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0, 0)
+    )
+    
+     for (i in 1:nrow(vertices)) {
+       p <- add_trace(p,
+                      x = vertices[i, 1] + offsets$x[i],
+                      y = vertices[i, 2] + offsets$y[i],
+                      z = vertices[i, 3] + offsets$z[i],
+                      type = "scatter3d",
+                      mode = "text",
+                      text = vertex_labels$label[i],
+                      textfont = list(family = "Arial", size = 14, color = "black", bold =      TRUE),
+                      textposition = text_positions[i], 
+                      showlegend = FALSE
+                      )
+     }
+
+    p <- layout(p,
+                title = list(
+                text = pathway,
+                font = list(family = "Arial", size = 20, color = "black", bold = TRUE),
+                x = 0.5,  # Center the title
+                xanchor = "center",
+                y = 0.9
+                ),
+                scene = list(
+                camera = list(
+                eye = list(x = 2, y = 1.5, z = 1)
+                ),
+                xaxis = list(title = "", showgrid = FALSE, zeroline = FALSE, showticklabels =                  FALSE),
+                yaxis = list(title = "", showgrid = FALSE, zeroline = FALSE, showticklabels =                  FALSE),
+                zaxis = list(title = "", showgrid = FALSE, zeroline = FALSE, showticklabels =                  FALSE)
+                )
+               )
+
+    print(p)
+    saveWidget(p, paste0(cell,"_",pathway,".html"), selfcontained = TRUE)
+    webshot(paste0(cell,"_",pathway,".html"), paste0(cell,"_",pathway,".png"), vwidth = 500, vheight = 450, zoom = 3)
+  }
+  cube_input <- split(cube_input, cube_input$Pathway)
+  write_xlsx(cube_input, file.path(data_dir, paste0("07_",cell,"_InputforCubeVisualization.xlsx")))
+}
+```
+
+```{r Generate DC specfiic dataframe and update vertex columns to facilitate square visualization include = FALSE}
+DC_hits <- subset(hits, Cell == "Dendritic Cell")
+DC_hits <- DC_hits %>%
+  mutate(Vertex1 = case_when(
+    grepl("Tri U DMSO", From) ~ 1,
+    grepl("Tri U Bem", From) ~ 4,
+    grepl("Tri I DMSO", From) ~ 2,
+    grepl("Tri I Bem", From) ~ 3
+  ),
+  Vertex2 = case_when(
+    grepl("Tri U DMSO", To) ~ 1,
+    grepl("Tri U Bem", To) ~ 4,
+    grepl("Tri I DMSO", To) ~ 2,
+    grepl("Tri I Bem", To) ~ 3 
+  ))
+```
+
+```{r Generate square visualization of GSEA results for dendritic cells include = FALSE}
+cell_types <- c("Dendritic Cell")
+
+for (cell in cell_types){
+  setwd(paste0(data_dir, "/07_DendriticCell"))
+  square_input <- data.frame(Pathway = character(0),
+                     NES = numeric(0),
+                     padj = numeric(0),
+                     From = character(0),
+                     To = character(0),
+                     Cell = character(0))
+  for (pathway in unique_pathways){
+    square_pathway <- data.frame(Pathway = rep(pathway, 4),
+                               NES = rep(0, 4), # NES treated as 0 when not significant
+                               padj = rep(1, 4), # padj treated as 1 when not significant
+                               From = c("Tri U Bem", "Tri I Bem", "Tri I DMSO", "Tri I Bem"),
+                               To = c("Tri U DMSO", "Tri I DMSO", "Tri U DMSO", "Tri U Bem"),
+                               Vertex1 = c(4, 3, 2, 3),
+                               Vertex2 = c(1, 2, 1, 4),
+                               Cell = rep(cell, 4))
+    square_data <- subset(DC_hits, Cell == cell & GeneSet == pathway)
+    # Only replace square_pathway values if square_data is not an empty dataframe
+    if (nrow(square_data) >= 1){
+      for (i in (1:nrow(square_data))){
+      score <- square_data$NES[i]
+      pval <- square_data$p_adj[i]
+      V1 <- square_data$Vertex1[i]
+      V2 <- square_data$Vertex2[i]
+      square_pathway[square_pathway$Vertex1 == V1 & square_pathway$Vertex2 == V2, "NES"] <- score
+      square_pathway[square_pathway$Vertex1 == V1 & square_pathway$Vertex2 == V2, "padj"] <- pval
+    }
+    }
+    
+    square_input <- rbind(square_input, square_pathway)
+    
+    values <- square_pathway$NES
+    
+    p <- plot_ly(type = "scatter3d", mode = "lines")
+
+    for (i in 1:nrow(edges_square)) {
+      p1 <- vertices_square[edges_square[i, 1], ]
+      p2 <- vertices_square[edges_square[i, 2], ]
+      val <- values[i]
+  
+      seg <- interpolate_edge(p1, p2, val, n = 20)
+  
+  
+      # Plot segments as very short lines (simulate gradient)
+        for (j in 1:(length(seg$x) - 1)) {
+          p <- add_trace(p,
+                         x = c(seg$x[j], seg$x[j+1]),
+                         y = c(seg$y[j], seg$y[j+1]),
+                         z = c(seg$z[j], seg$z[j+1]),
+                         mode = "lines",
+                         line = list(color = seg$col[j], width = 15),
+                         showlegend = FALSE
+               )
+        }
+    }
+
+    vertex_labels <- data.frame(
+    label = c("Tri U DMSO", "Tri I DMSO", "Tri I Bem", "Tri U Bem")
+              )
+
+    # Assign text positions to avoid overlap
+    text_positions <- c(
+    "top left", "top right", "top right", "top left"
+    )
+
+    # Offset amounts to nudge labels away from vertices
+    offsets <- data.frame(
+    x = c(0, 0, 0, 0),
+    y = c(0, 0, 0, 0),
+    z = c(-0.05, -0.05, -0.1, -0.1)
+    )
+
+    for (i in 1:nrow(vertices_square)) {
+      p <- add_trace(p,
+                     x = vertices_square[i, 1] + offsets$x[i],
+                     y = vertices_square[i, 2] + offsets$y[i],
+                     z = vertices_square[i, 3] + offsets$z[i],
+                     type = "scatter3d",
+                     mode = "text",
+                     text = vertex_labels$label[i],
+                     textfont = list(family = "Arial", size = 14, color = "black", bold =      TRUE),
+                     textposition = text_positions[i],
+                     showlegend = FALSE
+                     )
+    }
+
+    p <- layout(p,
+                title = list(
+                text = pathway,
+                font = list(family = "Arial", size = 20, color = "black", bold = TRUE),
+                x = 0.5,  # Center the title
+                xanchor = "center",
+                y = 0.9
+                ),
+                scene = list(
+                camera = list(
+                eye = list(x = 2, y = 0, z = 0)
+                ),
+                xaxis = list(title = "", showgrid = FALSE, zeroline = FALSE, showticklabels =                  FALSE),
+                yaxis = list(title = "", showgrid = FALSE, zeroline = FALSE, showticklabels =                  FALSE),
+                zaxis = list(title = "", showgrid = FALSE, zeroline = FALSE, showticklabels =                  FALSE)
+                )
+               )
+
+    print(p)
+    saveWidget(p, paste0(cell,"_",pathway,".html"), selfcontained = TRUE)
+    webshot(paste0(cell,"_",pathway,".html"), paste0(cell,"_",pathway,".png"), vwidth = 500, vheight = 450, zoom = 3)
+  }
+  square_input <- split(square_input, square_input$Pathway)
+  write_xlsx(square_input, file.path(data_dir, paste0("07_",cell,"_InputforSquareVisualization.xlsx")))
+}
+```
+
+> sessionInfo()
+R version 4.4.1 (2024-06-14)
+Platform: x86_64-apple-darwin20
+Running under: macOS 15.7.7
+
+Matrix products: default
+BLAS:   /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib 
+LAPACK: /Library/Frameworks/R.framework/Versions/4.4-x86_64/Resources/lib/libRlapack.dylib;  LAPACK version 3.12.0
+
+locale:
+[1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
+
+time zone: America/New_York
+tzcode source: internal
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] msigdbr_7.5.1     webshot2_0.1.2    htmlwidgets_1.6.4 plotly_4.10.4    
+ [5] readxl_1.4.3      writexl_1.5.1     ggplot2_4.0.0     patchwork_1.3.0  
+ [9] tidyr_1.3.1       dplyr_1.1.4      
+
+loaded via a namespace (and not attached):
+ [1] babelgene_22.9     jsonlite_1.8.9     gtable_0.3.6       compiler_4.4.1    
+ [5] promises_1.3.0     Rcpp_1.0.13-1      tidyselect_1.2.1   later_1.3.2       
+ [9] scales_1.4.0       fastmap_1.2.0      R6_2.5.1           generics_0.1.3    
+[13] knitr_1.49         tibble_3.2.1       pillar_1.9.0       RColorBrewer_1.1-3
+[17] rlang_1.1.4        websocket_1.4.4    utf8_1.2.4         xfun_0.49         
+[21] S7_0.2.0           lazyeval_0.2.2     viridisLite_0.4.2  cli_3.6.3         
+[25] withr_3.0.2        magrittr_2.0.3     ps_1.8.1           processx_3.8.6    
+[29] digest_0.6.37      grid_4.4.1         rstudioapi_0.17.1  chromote_0.5.1    
+[33] lifecycle_1.0.4    vctrs_0.6.5        evaluate_1.0.1     glue_1.8.0        
+[37] data.table_1.16.2  farver_2.1.2       cellranger_1.1.0   fansi_1.0.6       
+[41] purrr_1.0.2        httr_1.4.7         tools_4.4.1        pkgconfig_2.0.3   
+[45] htmltools_0.5.8.1 

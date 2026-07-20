@@ -1,0 +1,735 @@
+---
+title: "04_Tensor_cell2cell_Post_Decomposition"
+output: html_document
+date: "2025-06-30"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(forcats)
+library(rstatix)
+library(textshape)
+library(ggpubr)
+library(reshape2)
+library(stringr)
+library(tibble)
+library(scater)
+library(scuttle)
+library(ggplot2)
+library(writexl)
+library(readxl)
+library(Seurat)
+library(SingleCellExperiment)
+library(liana)
+library(reticulate)
+library(pheatmap)
+library(ggcorrplot)
+reticulate::use_condaenv('c2c_axl', required = TRUE)
+c2c <- reticulate::import(module = "cell2cell")
+data_dir <- "/Users/anishadatta/Documents/DAL_Lab/Manuscript_CMBE/Axl-Inhibition-TME-Composition/Data" # Location of data
+```
+
+```{r Load LIANA results and Tensor-cell2cell decomposition results include = FALSE}
+data_for_liana <- readRDS(file.path(data_dir, "03_sce_LIANA_results_by_sample.rds"))
+
+decomp <- "04_Tensor_post_decomp"
+tensor_decomp <- reticulate::py_load_object(filename = file.path(data_dir, paste0(decomp,".pkl")))
+
+data_for_liana@metadata$tensor_res <- liana:::format_c2c_factors(tensor_decomp$factors)
+```
+
+https://ccc-protocols.readthedocs.io/en/latest/notebooks/ccc_R/QuickStart.html#Perform-Tensor-Factorization
+```{r Identify the rank of the tensor decomposition and view the elbow plot include = FALSE}
+print(paste0('The estimated tensor rank is: ', tensor_decomp$rank))
+
+# Estimate standard error 
+error_average <- tensor_decomp$elbow_metric_raw %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(rank=row_number()) %>%
+  pivot_longer(-rank, names_to = "run_no", values_to = "error") %>%
+  group_by(rank) %>%
+  summarize(average = mean(error),
+            N = n(),
+            SE.low = average - (sd(error)/sqrt(N)),
+            SE.high = average + (sd(error)/sqrt(N))
+          )
+write_xlsx(error_average, file.path(data_dir, paste0(decomp, "_elbow_error_average.xlsx")))
+
+# plot
+pdf(file.path(data_dir, paste0(decomp, "_elbow_plot.pdf")), width = 7, height = 7)
+print(error_average %>%
+  ggplot(aes(x=rank, y=average), group=1) +
+  geom_point(col='red') + #instead of geom_line
+  geom_ribbon(aes(ymin = SE.low, ymax = SE.high), alpha = 0.1) +
+  geom_vline(xintercept = tensor_decomp$rank, colour='darkblue') + # rank of interest
+  theme_bw() +
+  labs(y="Error", x="Rank"))
+dev.off()
+```
+
+```{r Generate the loadings plots in each dimension for each factor of the decomposed tensor include = FALSE}
+h_ = 13
+w_ = 15
+options(repr.plot.height=h_, repr.plot.width=w_)
+pdf(file.path(data_dir, paste0(decomp,"_loadings_plots.pdf")), width = 25, height = 30)
+plot_c2c_overview(sce = data_for_liana, group_col = 'context_with_culture', sample_col = 'sample_new')
+dev.off()
+```
+
+https://ccc-protocols.readthedocs.io/en/latest/notebooks/ccc_R/04-Perform-Tensor-Factorization.html#Factorization-Results
+```{r Generate excel file of context (experimental condition) loadings for each factor include = FALSE}
+#Obtain the number of samples in the tensor
+sample_num <- tensor_decomp$shape[1][[1]]
+#Create an excel file that has the loadings for each sample for each factor
+sample_factor_loadings <- data.frame(sample = character(0),
+                              loading = numeric(0),
+                              Factor = character(0))
+for (i in 1:tensor_decomp$rank){
+  sample_loadings <- tensor_decomp$get_top_factor_elements(order_name = 'contexts', factor_name = paste0('Factor ', i), top_number = as.integer(sample_num))
+  sample_loadings <- as.data.frame(sample_loadings)
+  sample_loadings$sample <- rownames(sample_loadings)
+  rownames(sample_loadings) <- 1:nrow(sample_loadings)
+  sample_loadings$loading <- sample_loadings$sample_loadings
+  sample_loadings$Factor <- paste0("Factor",i)
+  sample_loadings <- subset(sample_loadings, select = -c(sample_loadings))
+  sample_factor_loadings <- rbind(sample_factor_loadings, sample_loadings)
+}
+
+split_loadings_by_factor <- split(sample_factor_loadings, sample_factor_loadings$Factor)
+write_xlsx(split_loadings_by_factor, file.path(data_dir, paste0(decomp, "_context_loadings.xlsx")))
+```
+
+```{r Generate excel file of sender and receiver loadings for each factor include = FALSE}
+#Obtain the number of senders/receivers in the tensor
+sender_receiver_num <- tensor_decomp$shape[3][[1]]
+#Create an excel file that has the loadings for each sender/receiver for each factor
+sender_receiver_loadings <- data.frame(sender = character(0),
+                                       sender_loading = numeric(0),
+                                       receiver = character(0),
+                                       receiver_loading = numeric(0),
+                                       Factor = character(0))
+for (i in 1:tensor_decomp$rank){
+  loadings <- tensor_decomp$get_top_factor_elements(order_name = 'senders', factor_name = paste0('Factor ', i), top_number = as.integer(sender_receiver_num))
+  loadings <- as.data.frame(loadings)
+  loadings$sender <- rownames(loadings)
+  rownames(loadings) <- 1:nrow(loadings)
+  loadings$sender_loadings <- loadings$loadings
+  loadings <- subset(loadings, select = -c(loadings))
+  receiver_loadings <- tensor_decomp$get_top_factor_elements(order_name = 'receivers', factor_name = paste0('Factor ', i), top_number = as.integer(sender_receiver_num))
+  receiver_loadings <- as.data.frame(receiver_loadings)
+  loadings$receiver <- rownames(receiver_loadings)
+  loadings$receiver_loadings <- receiver_loadings$receiver_loadings
+  loadings$Factor <- paste0("Factor",i)
+  sender_receiver_loadings <- rbind(sender_receiver_loadings, loadings)
+}
+
+split_loadings_by_factor <- split(sender_receiver_loadings, sender_receiver_loadings$Factor)
+write_xlsx(split_loadings_by_factor, file.path(data_dir, paste0(decomp, "_sender_receiver_loadings.xlsx")))
+```
+
+```{r Generate excel file of LR interaction loadings for each factor include = FALSE}
+#Obtain the number of LR interactions in the tensor
+LR_num <- tensor_decomp$shape[2][[1]]
+#Create an excel file that has the loadings for each LR interaction for each factor
+LR_factor_loadings <- data.frame(LR_pair = character(0),
+                          ligand = character(0),
+                          receptor = character(0),
+                          loading = numeric(0),
+                          Factor = character(0))
+for (i in 1:tensor_decomp$rank){
+  LR_loadings <- tensor_decomp$get_top_factor_elements(order_name = 'interactions', factor_name = paste0('Factor ', i) , top_number = as.integer(LR_num))
+  LR_loadings <- as.data.frame(LR_loadings)
+  LR_loadings$LR_pair <- rownames(LR_loadings)
+  rownames(LR_loadings) <- 1:nrow(LR_loadings)
+  #split LR pair into ligand and receptor
+  LR_loadings$ligand <- str_extract(LR_loadings$LR_pair, "[^\\^]+")
+  LR_loadings$receptor <- str_extract(LR_loadings$LR_pair, "(?<=\\^).*")
+  LR_loadings$loading <- LR_loadings$LR_loadings
+  LR_loadings$Factor <- paste0("Factor",i)
+  LR_loadings <- subset(LR_loadings, select = -c(LR_loadings))
+  LR_factor_loadings <- rbind(LR_factor_loadings, LR_loadings)
+}
+
+split_loadings_by_factor <- split(LR_factor_loadings, LR_factor_loadings$Factor)
+write_xlsx(split_loadings_by_factor, file.path(data_dir, paste0(decomp, "_LR_interaction_loadings.xlsx")))
+```
+
+```{r Generate combined list of top 10% LR interactions for each factor and calculate Spearman correlations based on their loadings across all 8 factors incldue = FALSE}
+# Identify top 10% LR interactions of each factor
+top10percent_LRpairs <- NULL
+for (i in 1:tensor_decomp$rank){
+  Factor <- filter(LR_factor_loadings, Factor == paste0('Factor',i))
+  rownames(Factor) <- 1:nrow(Factor)
+  Factor_top10percent <- Factor[1:(round(0.1 * nrow(Factor))), "LR_pair"]
+  top10percent_LRpairs <- append(top10percent_LRpairs, Factor_top10percent)
+}
+# Shorten top 10% list to unique LR interactions (remove redundancies)
+top10percent_unique_LRpairs <- unique(top10percent_LRpairs)
+
+# Generate matrix for calculating Spearman correlations
+matrix_for_correlation <- matrix(data = NA, nrow = length(top10percent_unique_LRpairs), ncol = tensor_decomp$rank)
+
+for (i in 1:length(top10percent_unique_LRpairs)){
+  LR <- top10percent_unique_LRpairs[i]
+  for (j in 1:tensor_decomp$rank){
+    loading <- filter(LR_factor_loadings, (Factor == paste0('Factor',j) & LR_pair == LR))$loading
+    matrix_for_correlation[i,j] <- loading
+  }
+}
+
+colnames(matrix_for_correlation) <- c("Factor 1", "Factor 2", "Factor 3", "Factor 4", "Factor 5", "Factor 6", "Factor 7", "Factor 8")
+rownames(matrix_for_correlation) <- top10percent_unique_LRpairs
+rownames(matrix_for_correlation) <- gsub("\\^", "-->", rownames(matrix_for_correlation))
+matrix_for_correlation_df <- data.frame(LR_pair = rownames(matrix_for_correlation))
+matrix_for_correlation_df <- cbind(matrix_for_correlation_df, as.data.frame(matrix_for_correlation))
+write_xlsx(matrix_for_correlation_df, file.path(data_dir, paste0(decomp, "_top10percent_LR_interaction_loadings_across_factors.xlsx")))
+
+# Calculate Spearman correlations and plot them
+factor_correlation <- cor(matrix_for_correlation, method = "spearman")
+pdf(file.path(data_dir, paste0(decomp, "_Top10Percent_LRInteractions_SpearmanCorrelationMatrix.pdf")), height = 5.29, width = 4.54)
+print(ggcorrplot(factor_correlation, type = "lower", outline.col = "white", lab = TRUE))
+dev.off()
+
+# Plot heatmap of unique top 10% LR interactions
+pdf(file.path(data_dir, paste0(decomp, "_Top10Percent_LRInteractions_Heatmap.pdf")), height = 8, width = 7)
+print(pheatmap(matrix_for_correlation, cluster_cols = TRUE, cluster_rows = TRUE, scale = "row"))
+dev.off()
+
+
+# Generate scatter plot for paired factors using the top 10 percent LR interactions across all 8 factors
+# For each pair of factors, identify which LR interactions are top interactions for both factors, one factor, or neither factor
+FirstFactor <- c("Factor1", "Factor2", "Factor4", "Factor5")
+SecondFactor <- c("Factor6", "Factor3", "Factor7", "Factor8")
+
+for (i in 1:length(FirstFactor)){
+  FirstFactorInteractions <- filter(LR_factor_loadings, Factor == FirstFactor[i])
+  rownames(FirstFactorInteractions) <- 1:nrow(FirstFactorInteractions)
+  FirstFactorInteractions <- FirstFactorInteractions[1:(round(0.1 * nrow(FirstFactorInteractions))), "LR_pair"]
+  
+  SecondFactorInteractions <- filter(LR_factor_loadings, Factor == SecondFactor[i])
+  rownames(SecondFactorInteractions) <- 1:nrow(SecondFactorInteractions)
+  SecondFactorInteractions <- SecondFactorInteractions[1:(round(0.1 * nrow(SecondFactorInteractions))), "LR_pair"]
+  
+  # Determine which interactions are redundant/shared and which ones are unique
+  LRs_intersect <- intersect(FirstFactorInteractions, SecondFactorInteractions)
+  LRs_first_only <- setdiff(FirstFactorInteractions, LRs_intersect)
+  LRs_second_only <- setdiff(SecondFactorInteractions, LRs_intersect)
+  
+  LR_interactions <- NULL
+  x_vals <- NULL
+  y_vals <- NULL
+  dot_color <- NULL
+  for (j in 1:length(top10percent_unique_LRpairs)){
+    LR <- top10percent_unique_LRpairs[j]
+    LR_interactions <- append(LR_interactions, LR)
+    first_factor_loading <- filter(LR_factor_loadings, (Factor == FirstFactor[i] & LR_pair == LR))
+    x <- first_factor_loading$loading
+    x_vals <- append(x_vals, x)
+    second_factor_loading <- filter(LR_factor_loadings, (Factor == SecondFactor[i] & LR_pair == LR))
+    y <- second_factor_loading$loading
+    y_vals <- append(y_vals, y)
+    
+    if (LR %in% LRs_intersect){
+      dot_color <- append(dot_color, "both") #purple
+    } else if (LR %in% LRs_first_only){
+      dot_color <- append(dot_color, "x_only") #pink
+    } else if (LR %in% LRs_second_only){
+      dot_color <- append(dot_color, "y_only") #blue
+    } else{
+      dot_color <- append(dot_color, "not_top_10") #grey
+    }
+  }
+  
+  scatter_plot_df <- data.frame(LR_pairs = LR_interactions, Factor_x = x_vals, Factor_y = y_vals, Color_Code = dot_color)
+  LR_plot <- ggplot(scatter_plot_df, aes(x = Factor_x, y = Factor_y, color = Color_Code)) + geom_point() + 
+  scale_color_manual(values = c("both" = "darkorchid1", "x_only" = "hotpink", "y_only" = "blue", "not_top_10" = "grey")) +
+  guides(color = "none") +
+  labs(title = "LR Interactions Loadings", x = FirstFactor[i], y = SecondFactor[i]) +
+  theme_bw() 
+  pdf(file.path(data_dir, paste0(decomp, FirstFactor[i], "_", SecondFactor[i], "_Top10Percent_LRInteractions_ScatterPlot.pdf")), height = 5.29, width = 4.54)
+  print(LR_plot)
+  dev.off()
+}
+```
+
+```{r Look more closely at top LR interactions within the specific factor pairs of interest  include = FALSE}
+
+for (i in 1:length(FirstFactor)){
+  FirstFactorInteractions <- filter(LR_factor_loadings, Factor == FirstFactor[i])
+  rownames(FirstFactorInteractions) <- 1:nrow(FirstFactorInteractions)
+  FirstFactorInteractions <- FirstFactorInteractions[1:(round(0.1 * nrow(FirstFactorInteractions))), "LR_pair"]
+  
+  SecondFactorInteractions <- filter(LR_factor_loadings, Factor == SecondFactor[i])
+  rownames(SecondFactorInteractions) <- 1:nrow(SecondFactorInteractions)
+  SecondFactorInteractions <- SecondFactorInteractions[1:(round(0.1 * nrow(SecondFactorInteractions))), "LR_pair"]
+  
+  LRs_intersect <- intersect(FirstFactorInteractions, SecondFactorInteractions)
+  LRs_first_only <- setdiff(FirstFactorInteractions, LRs_intersect)
+  LRs_second_only <- setdiff(SecondFactorInteractions, LRs_intersect)
+  
+  LRs <- c(FirstFactorInteractions, SecondFactorInteractions)
+  LRs <- unique(LRs)
+  LR_interactions <- NULL
+  x_vals <- NULL
+  y_vals <- NULL
+  for (j in 1:length(LRs)){
+    LR <- LRs[j]
+    LR_interactions <- append(LR_interactions, LR)
+    first_factor_loading <- filter(LR_factor_loadings, (Factor == FirstFactor[i] & LR_pair == LR))
+    x <- first_factor_loading$loading
+    x_vals <- append(x_vals, x)
+    second_factor_loading <- filter(LR_factor_loadings, (Factor == SecondFactor[i] & LR_pair == LR))
+    y <- second_factor_loading$loading
+    y_vals <- append(y_vals, y)
+  }
+    top_LR_interactions_df <- data.frame(LR_pairs = LR_interactions, Factor_x = x_vals, Factor_y = y_vals)
+
+  #Generate excel dataframes for the LR interactions loadings based on unique and shared pairs
+  shared_loadings_df <- data.frame(LR_pair = character(0),
+                                   Factor_on_x = numeric(0),
+                                   Factor_on_y = numeric(0))
+  for(shared_pair in LRs_intersect){
+    shared_pair_loadings <- filter(top_LR_interactions_df, LR_pairs == shared_pair)
+    x_factor <- shared_pair_loadings$Factor_x
+    y_factor <- shared_pair_loadings$Factor_y
+    shared <- data.frame(LR_pair = shared_pair, Factor_on_x = x_factor, Factor_on_y = y_factor)
+    shared_loadings_df <- rbind(shared_loadings_df, shared)
+  }
+  shared_loadings_df$LR_pair <- gsub("\\^", "-->", shared_loadings_df$LR_pair)
+  colnames(shared_loadings_df) <- c("LR Interaction", FirstFactor[i], SecondFactor[i])
+  write_xlsx(shared_loadings_df, file.path(data_dir, paste0(decomp, FirstFactor[i], "_", SecondFactor[i], "_SharedTopLRInteractionLoadings.xlsx")))
+  
+  first_only_loadings_df <- data.frame(LR_pair = character(0),
+                                       Factor_on_x = numeric(0),
+                                       Factor_on_y = numeric(0))
+  for(first_only_pair in LRs_first_only){
+    first_pair_loadings <- filter(top_LR_interactions_df, LR_pairs == first_only_pair)
+    x_factor <- first_pair_loadings$Factor_x
+    y_factor <- first_pair_loadings$Factor_y
+    first_only <- data.frame(LR_pair = first_only_pair, Factor_on_x = x_factor, Factor_on_y = y_factor)
+    first_only_loadings_df <- rbind(first_only_loadings_df, first_only)
+  }
+  first_only_loadings_df$LR_pair <- gsub("\\^", "-->", first_only_loadings_df$LR_pair)
+  colnames(first_only_loadings_df) <- c("LR Interaction", FirstFactor[i], SecondFactor[i])
+  write_xlsx(first_only_loadings_df, file.path(data_dir, paste0(decomp, FirstFactor[i], "_", SecondFactor[i], "_UniqueTopLRInteractionLoadings_xaxis.xlsx")))
+  
+  second_only_loadings_df <- data.frame(LR_pair = character(0),
+                                       Factor_on_x = numeric(0),
+                                       Factor_on_y = numeric(0))
+  for(second_only_pair in LRs_second_only){
+    second_pair_loadings <- filter(top_LR_interactions_df, LR_pairs == second_only_pair)
+    x_factor <- second_pair_loadings$Factor_x
+    y_factor <- second_pair_loadings$Factor_y
+    second_only <- data.frame(LR_pair = second_only_pair, Factor_on_x = x_factor, Factor_on_y = y_factor)
+    second_only_loadings_df <- rbind(second_only_loadings_df, second_only)
+  }
+  second_only_loadings_df$LR_pair <- gsub("\\^", "-->", second_only_loadings_df$LR_pair)
+  colnames(second_only_loadings_df) <- c("LR Interaction", FirstFactor[i], SecondFactor[i])
+  write_xlsx(second_only_loadings_df, file.path(data_dir, paste0(decomp, FirstFactor[i], "_", SecondFactor[i], "_UniqueTopLRInteractionLoadings_yaxis.xlsx")))
+
+  #Generate a heatmap of LR interaction loadings across all 8 factors specifically for the list of top LR interactions for the specific factor pair of interest
+  top10percent_LRpairs_heatmap_df <- data.frame(LR_pair = character(0),
+                                        Factor1 = numeric(0),
+                                        Factor2 = numeric(0),
+                                        Factor3 = numeric(0),
+                                        Factor4 = numeric(0),
+                                        Factor5 = numeric(0),
+                                        Factor6 = numeric(0),
+                                        Factor7 = numeric(0),
+                                        Factor8 = numeric(0))
+  top10percent_LRpairs_df <- filter(LR_factor_loadings, LR_pair %in% LRs)
+  top10percent_LRpairs_df <- dplyr::select(top10percent_LRpairs_df, -c("ligand", "receptor"))
+  for(pair in LRs){
+    all_factor_loadings <- filter(top10percent_LRpairs_df, LR_pair == pair)
+    factor1_loading <- all_factor_loadings[all_factor_loadings$Factor == "Factor1", "loading"]
+    factor2_loading <- all_factor_loadings[all_factor_loadings$Factor == "Factor2", "loading"]
+    factor3_loading <- all_factor_loadings[all_factor_loadings$Factor == "Factor3", "loading"]
+    factor4_loading <- all_factor_loadings[all_factor_loadings$Factor == "Factor4", "loading"]
+    factor5_loading <- all_factor_loadings[all_factor_loadings$Factor == "Factor5", "loading"]
+    factor6_loading <- all_factor_loadings[all_factor_loadings$Factor == "Factor6", "loading"]
+    factor7_loading <- all_factor_loadings[all_factor_loadings$Factor == "Factor7", "loading"]
+    factor8_loading <- all_factor_loadings[all_factor_loadings$Factor == "Factor8", "loading"]
+    heatmap_df <- data.frame(LR_pair = pair,
+                            Factor1 = factor1_loading,
+                            Factor2 = factor2_loading,
+                            Factor3 = factor3_loading,
+                            Factor4 = factor4_loading,
+                            Factor5 = factor5_loading,
+                            Factor6 = factor6_loading,
+                            Factor7 = factor7_loading,
+                            Factor8 = factor8_loading)
+    top10percent_LRpairs_heatmap_df <- rbind(top10percent_LRpairs_heatmap_df, heatmap_df)
+  }
+  top10percent_LRpairs_heatmap_matrix <- as.matrix(top10percent_LRpairs_heatmap_df[,2:9])
+  rownames(top10percent_LRpairs_heatmap_matrix) <- top10percent_LRpairs_heatmap_df$LR_pair
+  rownames(top10percent_LRpairs_heatmap_matrix) <- gsub("\\^", "-->", rownames(top10percent_LRpairs_heatmap_matrix))
+
+  pdf(file.path(data_dir, paste0(decomp, FirstFactor[i], "_", SecondFactor[i], "_Top10Percent_LRInteractions_Heatmap.pdf")), height = 8, width = 7)
+  print(pheatmap(top10percent_LRpairs_heatmap_matrix, cluster_cols = TRUE, cluster_rows = TRUE, scale = "row"))
+  dev.off()
+}
+```
+
+```{r Add metadata columns to generate summary plots for each LR interaction include = FALSE}
+liana_res <- data_for_liana@metadata$liana_res %>% bind_rows(.id = "sample_new") %>% mutate(sample_new = factor(sample_new, levels = unique(sample_new)))
+
+# Add columns of metadata
+liana_res <- liana_res %>%
+  mutate(Donor = case_when(
+    grepl("_A", sample_new) ~ "A",
+    grepl("Bem_B", sample_new) ~ "B",
+    grepl("DMSO_B", sample_new) ~ "B",
+    grepl("_C", sample_new) ~ "C",
+    grepl("Bem_D", sample_new) ~ "D",
+    grepl("DMSO_D", sample_new) ~ "D"
+  ),
+  Culture = case_when(
+    grepl("co_", sample_new) ~ "Co-Culture",
+    grepl("tri_", sample_new) ~ "Tri-Culture"
+  ),
+  A375 = case_when(
+    grepl("_N_", sample_new) ~ "Untreated",
+    grepl("_Y_", sample_new) ~ "Injured"
+  ),
+  Inhibitor = case_when(
+    grepl("_Bem_", sample_new) ~ "Bem",
+    grepl("_DMSO_", sample_new) ~ "DMSO"
+  ))
+
+liana_res <- liana_res %>%
+  select(Donor, Culture, A375, Inhibitor, source, target, ligand.complex, receptor.complex, magnitude_rank)
+liana_res$LR_Pair <- paste0(liana_res$ligand.complex, "^", liana_res$receptor.complex)
+liana_res$Communication <- paste0(liana_res$Culture, " ", liana_res$source, " --> ", liana_res$target)
+```
+
+```{r Function for generating summary plots include = FALSE}
+plot_interaction_dotplot <- function(df) {
+
+  ligand   <- unique(df$ligand.complex)
+  receptor <- unique(df$receptor.complex)
+
+  ggplot(df, aes(
+    x = Communication,
+    y = 1 - magnitude_rank,
+    color = Inhibitor 
+  )) +
+    geom_jitter(
+      position = position_jitterdodge(
+        jitter.width = 0.05,
+        dodge.width = 0.5
+      ),
+      size = 2.5,
+      alpha = 0.7, 
+      shape = 21,
+      fill = NA, 
+      stroke = 0.8
+    ) +
+    facet_wrap(~ A375) + 
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+      panel.grid.major.x = element_blank(),
+      plot.title = element_text(hjust = 0.5, face = "bold")
+    ) +
+    labs(
+      title = paste(ligand, "\u2192", receptor),
+      x = "Communication",
+      y = "Magnitude",
+      color = "Inhibitor" 
+    ) 
+}
+```
+
+```{r Generate LIANA magnitude plots for Factors 1 and 6 include = FALSE}
+FirstFactor <- "Factor1"
+SecondFactor <- "Factor6"
+
+FirstFactorInteractions <- filter(LR_factor_loadings, Factor == FirstFactor)
+rownames(FirstFactorInteractions) <- 1:nrow(FirstFactorInteractions)
+FirstFactorInteractions <- FirstFactorInteractions[1:(round(0.1 * nrow(FirstFactorInteractions))), "LR_pair"]
+  
+SecondFactorInteractions <- filter(LR_factor_loadings, Factor == SecondFactor)
+rownames(SecondFactorInteractions) <- 1:nrow(SecondFactorInteractions)
+SecondFactorInteractions <- SecondFactorInteractions[1:(round(0.1 * nrow(SecondFactorInteractions))), "LR_pair"]
+  
+# Determine which interactions are redundant/shared and which ones are unique
+LRs_intersect <- intersect(FirstFactorInteractions, SecondFactorInteractions)
+LRs_first_only <- setdiff(FirstFactorInteractions, LRs_intersect)
+LRs_second_only <- setdiff(SecondFactorInteractions, LRs_intersect)
+
+# Create plots for the shared interactions
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor1_Factor6_SharedTopInteractions_LIANA")
+for (pair in LRs_intersect){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source %in% c("Macrophage", "Dendritic Cell") & target %in% c("Macrophage", "Dendritic Cell"))
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+
+# Create plots for for top interactions specific to Factor 1
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor1_Factor6_UniqueTopInteractions_xaxis_LIANA")
+for (pair in LRs_first_only){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source %in% c("Macrophage", "Dendritic Cell") & target %in% c("Macrophage", "Dendritic Cell"))
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+
+# Create plots for for top interactions specific to Factor 6
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor1_Factor6_UniqueTopInteractions_yaxis_LIANA")
+for (pair in LRs_second_only){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source %in% c("Macrophage", "Dendritic Cell") & target %in% c("Macrophage", "Dendritic Cell"))
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+```
+
+```{r Generate LIANA magnitude plots for Factors 2 and 3 include = FALSE}
+FirstFactor <- "Factor2"
+SecondFactor <- "Factor3"
+
+FirstFactorInteractions <- filter(LR_factor_loadings, Factor == FirstFactor)
+rownames(FirstFactorInteractions) <- 1:nrow(FirstFactorInteractions)
+FirstFactorInteractions <- FirstFactorInteractions[1:(round(0.1 * nrow(FirstFactorInteractions))), "LR_pair"]
+  
+SecondFactorInteractions <- filter(LR_factor_loadings, Factor == SecondFactor)
+rownames(SecondFactorInteractions) <- 1:nrow(SecondFactorInteractions)
+SecondFactorInteractions <- SecondFactorInteractions[1:(round(0.1 * nrow(SecondFactorInteractions))), "LR_pair"]
+  
+# Determine which interactions are redundant/shared and which ones are unique
+LRs_intersect <- intersect(FirstFactorInteractions, SecondFactorInteractions)
+LRs_first_only <- setdiff(FirstFactorInteractions, LRs_intersect)
+LRs_second_only <- setdiff(SecondFactorInteractions, LRs_intersect)
+
+# Create plots for the shared interactions
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor2_Factor3_SharedTopInteractions_LIANA")
+for (pair in LRs_intersect){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source == "Tumor Cell" & target == "Tumor Cell")
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+
+# Create plots for for top interactions specific to Factor 2
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor2_Factor3_UniqueTopInteractions_xaxis_LIANA")
+for (pair in LRs_first_only){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source == "Tumor Cell" & target == "Tumor Cell")
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+
+# Create plots for for top interactions specific to Factor 3
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor2_Factor3_UniqueTopInteractions_yaxis_LIANA")
+for (pair in LRs_second_only){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source == "Tumor Cell" & target == "Tumor Cell")
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+```
+
+```{r Generate LIANA magnitude plots for Factors 4 and 7 include = FALSE}
+FirstFactor <- "Factor4"
+SecondFactor <- "Factor7"
+
+FirstFactorInteractions <- filter(LR_factor_loadings, Factor == FirstFactor)
+rownames(FirstFactorInteractions) <- 1:nrow(FirstFactorInteractions)
+FirstFactorInteractions <- FirstFactorInteractions[1:(round(0.1 * nrow(FirstFactorInteractions))), "LR_pair"]
+  
+SecondFactorInteractions <- filter(LR_factor_loadings, Factor == SecondFactor)
+rownames(SecondFactorInteractions) <- 1:nrow(SecondFactorInteractions)
+SecondFactorInteractions <- SecondFactorInteractions[1:(round(0.1 * nrow(SecondFactorInteractions))), "LR_pair"]
+  
+# Determine which interactions are redundant/shared and which ones are unique
+LRs_intersect <- intersect(FirstFactorInteractions, SecondFactorInteractions)
+LRs_first_only <- setdiff(FirstFactorInteractions, LRs_intersect)
+LRs_second_only <- setdiff(SecondFactorInteractions, LRs_intersect)
+
+# Create plots for the shared interactions
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor4_Factor7_SharedTopInteractions_LIANA")
+for (pair in LRs_intersect){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source == "Tumor Cell" & target %in% c("Macrophage", "Dendritic Cell"))
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+
+# Create plots for for top interactions specific to Factor 4
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor4_Factor7_UniqueTopInteractions_xaxis_LIANA")
+for (pair in LRs_first_only){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source == "Tumor Cell" & target %in% c("Macrophage", "Dendritic Cell"))
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+
+# Create plots for for top interactions specific to Factor 7
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor4_Factor7_UniqueTopInteractions_yaxis_LIANA")
+for (pair in LRs_second_only){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source == "Tumor Cell" & target %in% c("Macrophage", "Dendritic Cell"))
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+```
+
+```{r Generate LIANA magnitude plots for Factors 4 and 7 include = FALSE}
+FirstFactor <- "Factor5"
+SecondFactor <- "Factor8"
+
+FirstFactorInteractions <- filter(LR_factor_loadings, Factor == FirstFactor)
+rownames(FirstFactorInteractions) <- 1:nrow(FirstFactorInteractions)
+FirstFactorInteractions <- FirstFactorInteractions[1:(round(0.1 * nrow(FirstFactorInteractions))), "LR_pair"]
+  
+SecondFactorInteractions <- filter(LR_factor_loadings, Factor == SecondFactor)
+rownames(SecondFactorInteractions) <- 1:nrow(SecondFactorInteractions)
+SecondFactorInteractions <- SecondFactorInteractions[1:(round(0.1 * nrow(SecondFactorInteractions))), "LR_pair"]
+  
+# Determine which interactions are redundant/shared and which ones are unique
+LRs_intersect <- intersect(FirstFactorInteractions, SecondFactorInteractions)
+LRs_first_only <- setdiff(FirstFactorInteractions, LRs_intersect)
+LRs_second_only <- setdiff(SecondFactorInteractions, LRs_intersect)
+
+# Create plots for the shared interactions
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor5_Factor8_SharedTopInteractions_LIANA")
+for (pair in LRs_intersect){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source %in% c("Macrophage", "Dendritic Cell") & target == "Tumor Cell")
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+
+# Create plots for for top interactions specific to Factor 5
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor5_Factor8_UniqueTopInteractions_xaxis_LIANA")
+for (pair in LRs_first_only){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source %in% c("Macrophage", "Dendritic Cell") & target == "Tumor Cell")
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+
+# Create plots for for top interactions specific to Factor 8
+data_out <- paste0(data_dir, "/04_Tensor_post_decompFactor5_Factor8_UniqueTopInteractions_yaxis_LIANA")
+for (pair in LRs_second_only){
+  interaction_of_interst <- subset(liana_res, LR_Pair == pair & source %in% c("Macrophage", "Dendritic Cell") & target == "Tumor Cell")
+  pdf(file.path(data_out, paste0(pair,".pdf")), height = 7, width = 7)
+  print(plot_interaction_dotplot(interaction_of_interst))
+  dev.off()
+}
+```
+
+```{r Generate loadings plots when cell cluster identities are retained in the analysis (6 cell types instead of collapsing into 3 cell types include = FALSE}
+data_for_liana <- readRDS(file.path(data_dir, "03_sce_LIANA_results_by_sample_6CellTypes.rds"))
+
+decomp <- "04_Tensor_post_decomp_6CellTypes"
+tensor_decomp <- reticulate::py_load_object(filename = file.path(data_dir, paste0(decomp,".pkl")))
+
+data_for_liana@metadata$tensor_res <- liana:::format_c2c_factors(tensor_decomp$factors)
+
+h_ = 13
+w_ = 15
+options(repr.plot.height=h_, repr.plot.width=w_)
+pdf(file.path(data_dir, paste0(decomp,"_loadings_plots.pdf")), width = 25, height = 30)
+plot_c2c_overview(sce = data_for_liana, group_col = 'context_with_culture', sample_col = 'sample_new')
+dev.off()
+```
+
+> sessionInfo()
+R version 4.4.1 (2024-06-14)
+Platform: x86_64-apple-darwin20
+Running under: macOS 15.7.7
+
+Matrix products: default
+BLAS:   /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib 
+LAPACK: /Library/Frameworks/R.framework/Versions/4.4-x86_64/Resources/lib/libRlapack.dylib;  LAPACK version 3.12.0
+
+locale:
+[1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
+
+time zone: America/New_York
+tzcode source: internal
+
+attached base packages:
+[1] stats4    stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] ggcorrplot_0.1.4.1          pheatmap_1.0.12             reticulate_1.40.0          
+ [4] liana_0.1.14                Seurat_5.1.0                SeuratObject_5.0.2         
+ [7] sp_2.1-4                    readxl_1.4.3                writexl_1.5.1              
+[10] scater_1.32.1               scuttle_1.14.0              SingleCellExperiment_1.26.0
+[13] SummarizedExperiment_1.34.0 Biobase_2.64.0              GenomicRanges_1.56.2       
+[16] GenomeInfoDb_1.40.1         IRanges_2.38.1              S4Vectors_0.42.1           
+[19] BiocGenerics_0.50.0         MatrixGenerics_1.16.0       matrixStats_1.4.1          
+[22] tibble_3.2.1                stringr_1.5.1               reshape2_1.4.4             
+[25] ggpubr_0.6.1                ggplot2_4.0.0               textshape_1.7.5            
+[28] rstatix_0.7.2               forcats_1.0.0               purrr_1.0.2                
+[31] tidyr_1.3.1                 dplyr_1.1.4                
+
+loaded via a namespace (and not attached):
+  [1] spatstat.sparse_3.1-0     fs_1.6.5                  lubridate_1.9.3          
+  [4] httr_1.4.7                RColorBrewer_1.1-3        doParallel_1.0.17        
+  [7] sctransform_0.4.1         tools_4.4.1               backports_1.5.0          
+ [10] utf8_1.2.4                R6_2.5.1                  uwot_0.2.2               
+ [13] lazyeval_0.2.2            GetoptLong_1.0.5          withr_3.0.2              
+ [16] prettyunits_1.2.0         gridExtra_2.3             progressr_0.15.0         
+ [19] cli_3.6.3                 spatstat.explore_3.3-3    fastDummies_1.7.4        
+ [22] spatstat.data_3.1-4       S7_0.2.0                  readr_2.1.5              
+ [25] pbapply_1.7-2             ggridges_0.5.6            R.utils_2.13.0           
+ [28] parallelly_1.39.0         sessioninfo_1.2.2         limma_3.60.6             
+ [31] rstudioapi_0.17.1         RSQLite_2.3.8             generics_0.1.3           
+ [34] shape_1.4.6.1             spatstat.random_3.3-2     ica_1.0-3                
+ [37] car_3.1-3                 zip_2.3.1                 Matrix_1.7-1             
+ [40] ggbeeswarm_0.7.2          fansi_1.0.6               logger_0.4.0             
+ [43] abind_1.4-8               R.methodsS3_1.8.2         lifecycle_1.0.4          
+ [46] yaml_2.3.10               edgeR_4.2.2               carData_3.0-5            
+ [49] SparseArray_1.4.8         Rtsne_0.17                grid_4.4.1               
+ [52] blob_1.2.4                promises_1.3.0            dqrng_0.4.1              
+ [55] crayon_1.5.3              miniUI_0.1.1.1            dir.expiry_1.10.0        
+ [58] lattice_0.22-6            beachmat_2.20.0           cowplot_1.1.3            
+ [61] chromote_0.5.1            pillar_1.9.0              knitr_1.49               
+ [64] ComplexHeatmap_2.18.0     metapod_1.10.1            rjson_0.2.23             
+ [67] future.apply_1.11.3       codetools_0.2-20          leiden_0.4.3.1           
+ [70] glue_1.8.0                spatstat.univar_3.1-1     data.table_1.16.2        
+ [73] vctrs_0.6.5               png_0.1-8                 spam_2.11-0              
+ [76] cellranger_1.1.0          gtable_0.3.6              cachem_1.1.0             
+ [79] OmnipathR_3.15.9          xfun_0.49                 mime_0.12                
+ [82] S4Arrays_1.4.1            survival_3.7-0            iterators_1.0.14         
+ [85] statmod_1.5.0             bluster_1.12.0            fitdistrplus_1.2-1       
+ [88] ROCR_1.0-11               nlme_3.1-166              bit64_4.5.2              
+ [91] progress_1.2.3            filelock_1.0.3            RcppAnnoy_0.0.22         
+ [94] irlba_2.3.5.1             vipor_0.4.7               KernSmooth_2.23-24       
+ [97] colorspace_2.1-1          DBI_1.2.3                 tidyselect_1.2.1         
+[100] processx_3.8.6            bit_4.5.0                 compiler_4.4.1           
+[103] curl_6.0.1                rvest_1.0.4               httr2_1.0.6              
+[106] BiocNeighbors_1.22.0      basilisk.utils_1.19.1     xml2_1.3.6               
+[109] plotly_4.10.4             DelayedArray_0.30.1       checkmate_2.3.2          
+[112] scales_1.4.0              lmtest_0.9-40             rappdirs_0.3.3           
+[115] goftest_1.2-3             digest_0.6.37             spatstat.utils_3.1-1     
+[118] rmarkdown_2.29            basilisk_1.19.1           XVector_0.44.0           
+[121] htmltools_0.5.8.1         pkgconfig_2.0.3           sparseMatrixStats_1.16.0 
+[124] fastmap_1.2.0             htmlwidgets_1.6.4         rlang_1.1.4              
+[127] GlobalOptions_0.1.2       UCSC.utils_1.0.0          shiny_1.9.1              
+[130] DelayedMatrixStats_1.26.0 farver_2.1.2              zoo_1.8-12               
+[133] jsonlite_1.8.9            BiocParallel_1.38.0       R.oo_1.27.0              
+[136] BiocSingular_1.20.0       magrittr_2.0.3            Formula_1.2-5            
+[139] GenomeInfoDbData_1.2.12   dotCall64_1.2             patchwork_1.3.0          
+[142] Rcpp_1.0.13-1             viridis_0.6.5             stringi_1.8.4            
+[145] zlibbioc_1.50.0           MASS_7.3-61               plyr_1.8.9               
+[148] parallel_4.4.1            listenv_0.9.1             ggrepel_0.9.6            
+[151] deldir_2.0-4              splines_4.4.1             tensor_1.5               
+[154] hms_1.1.3                 circlize_0.4.16           locfit_1.5-9.10          
+[157] ps_1.8.1                  igraph_2.1.1              spatstat.geom_3.3-4      
+[160] ggsignif_0.6.4            RcppHNSW_0.6.0            ScaledMatrix_1.12.0      
+[163] XML_3.99-0.17             evaluate_1.0.1            scran_1.32.0             
+[166] httpuv_1.6.15             tzdb_0.4.0                foreach_1.5.2            
+[169] polyclip_1.10-7           RANN_2.6.2                scattermore_1.2          
+[172] future_1.34.0             clue_0.3-66               rsvd_1.0.5               
+[175] xtable_1.8-6              broom_1.0.7               RSpectra_0.16-2          
+[178] later_1.3.2               viridisLite_0.4.2         websocket_1.4.4          
+[181] memoise_2.0.1             beeswarm_0.4.0            cluster_2.1.6            
+[184] timechange_0.3.0          globals_0.16.3 
